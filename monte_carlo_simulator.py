@@ -1,5 +1,7 @@
 import random
 from types import SimpleNamespace
+import pandas as pd
+from tabulate import tabulate
 
 def roll_dice(num_dice, num_sides, modifier=0):
     """模拟掷骰子并返回总和。"""
@@ -19,7 +21,7 @@ def stacking_bonus_action(state, attacker, defender):
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
     if attack_roll > defender.defense:
         consecutive_hits = state.get('consecutive_hits', 0)
-        bonus_damage = min(consecutive_hits, 3) * 4
+        bonus_damage = min(consecutive_hits, 3) * 5
         damage = attacker.base_damage_roll() + bonus_damage
         state['consecutive_hits'] = consecutive_hits + 1
         return damage, 1
@@ -228,7 +230,7 @@ def lance_action(state, attacker, defender):
         total_damage_this_turn += attacker.base_damage_roll()
 
     # 40%概率追击
-    if random.random() < 0.40:
+    if random.random() < 1:
         attack_roll_2 = roll_dice(2, 12, attacker.attack_modifier)
         if attack_roll_2 > defender.defense:
             total_hits_this_turn += 1
@@ -251,195 +253,143 @@ def light_bowgun_action(state, attacker, defender):
     
     return 0, 0
 
+def heavy_bowgun_action(state, attacker, defender):
+    """动作: 重弩。根据固定的buff层数获得攻击和伤害加成。"""
+    # Buff层数由attacker对象提供，是固定的
+    buff_stacks = attacker.buff_stacks
+    
+    # 根据buff层数计算动态加成
+    current_attack_modifier = attacker.attack_modifier + buff_stacks * 1
+    bonus_damage = buff_stacks * 1
+    
+    # 执行攻击
+    attack_roll = roll_dice(2, 12, current_attack_modifier)
+    
+    if attack_roll > defender.defense:
+        damage = attacker.base_damage_roll() + bonus_damage
+        return damage, 1
+    else:
+        return 0, 0
+
 # --- 模拟器核心 ---
 class Simulator:
     def __init__(self, action_function, attacker_stats, defender_stats):
         self.action_function = action_function
         self.attacker_stats = attacker_stats
         self.defender_stats = defender_stats
-        self.state = {}
 
-    def run(self, num_simulations=10000):
-        total_hits, total_damage = 0, 0
-        self.state = {}
-        for _ in range(num_simulations):
-            damage_this_turn, hits_this_turn = self.action_function(self.state, self.attacker_stats, self.defender_stats)
-            total_damage += damage_this_turn
-            total_hits += hits_this_turn
+    def _convert_damage_to_hp_loss(self, damage, pro_level):
+        """根据伤害阈值将伤害转换为HP损失。"""
+        if damage <= 0:
+            return 0
         
-        avg_hits = total_hits / num_simulations
-        avg_damage = total_damage / num_simulations
-        return avg_hits, avg_damage
+        # 根据Pro等级选择正确的阈值
+        threshold1, threshold2 = self.defender_stats.thresholds[pro_level - 1]
+        if damage < threshold1:
+            return 1
+        elif damage < threshold2:
+            return 2
+        else:
+            return 3
+
+    def run(self, num_simulations=10000, num_rounds=10, pro_level=1):
+        grand_total_hp_loss = 0
+        grand_total_hits = 0
+
+        for _ in range(num_simulations):
+            state = {}
+            battle_total_hp_loss = 0
+            
+            for _ in range(num_rounds):
+                damage_this_round, hits_this_round = self.action_function(state, self.attacker_stats, self.defender_stats)
+                hp_loss_this_round = self._convert_damage_to_hp_loss(damage_this_round, pro_level)
+                battle_total_hp_loss += hp_loss_this_round
+                grand_total_hits += hits_this_round
+            
+            grand_total_hp_loss += battle_total_hp_loss
+
+        # 计算每场战斗的平均值
+        avg_hp_loss_per_battle = grand_total_hp_loss / num_simulations
+        avg_hits_per_battle = grand_total_hits / num_simulations
+        
+        # 返回每场战斗的平均扣血和平均命中
+        return avg_hits_per_battle, avg_hp_loss_per_battle
 
 if __name__ == "__main__":
     # --- 通用配置 ---
-    NUM_SIMULATIONS = 100000
-    DEFENDER = SimpleNamespace(defense=13)
+    NUM_SIMULATIONS = 10000
+    NUM_ROUNDS = 10
+    DEFENDER = SimpleNamespace(
+        defense=13,
+        thresholds=[[8, 16], [13, 26], [13, 26], [20, 35], [20, 35], [36, 66]]
+    )
     ATTACKER_MOD = 0
-    Pro = 2
 
-    print(f"模拟环境: 攻击调整值={ATTACKER_MOD}, 敌人防御={DEFENDER.defense}, 模拟次数={NUM_SIMULATIONS}\n")
+    # --- 武器配置中心 ---
+    WEAPON_CONFIG = {
+        "参考":       {"dice": 10, "bonus": [3,6,6,9,9,12], "action": simple_attack_action},
+        "大剑":       {"dice": 12, "bonus": [3,6,6,9,9,12],   "action": simple_attack_action, "params": {"damage_multiplier": 2}},
+        "片手":       {"dice": 8,  "bonus": [2,5,5,8,8,11],   "action": simple_attack_action, "params": {"extra_roll_dice": 8}},
+        "双刀":       {"dice": 6,  "bonus": [1,4,4,7,7,10],   "action": multi_attack_action,  "params": {"num_attacks": 3}},
+        "太刀":       {"dice": 10, "bonus": [0,3,3,6,6,9],   "action": stacking_bonus_action},
+        "大锤":       {"dice": 12, "bonus": [1,4,4,7,7,10],   "action": great_hammer_action},
+        "狩猎笛":     {"dice": 8,  "bonus": [3,6,6,9,9,12],   "action": simple_attack_action, "params": {"attack_modifier_bonus": 1, "damage_bonus": 2}},
+        "长枪":       {"dice": 8,  "bonus": [1,4,4,7,7,10],   "action": lance_action},
+        "铳枪":       {"dice": 10, "bonus": [3,6,6,9,9,12],   "action": wyvernstake_action},
+        "斩斧 (N=3)": {"dice": 10, "bonus": [3,6,6,9,9,12],   "action": form_switching_action,"params": {"form_switch_threshold": 3, "form_duration": 3, "form_damage_bonus": 9, "form_attack_bonus": 9}},
+        "盾斧 (N=4)": {"dice": 12, "bonus": [0,3,3,6,6,9],   "action": charge_blade_action,  "params": {"discharge_threshold": 4, "num_aoe_targets": 3}},
+        "虫棍":       {"dice": 8,  "bonus": [1,4,4,7,7,10],   "action": insect_glaive_action},
+        "龙矢":       {"dice": 8,  "bonus": [3,6,6,9,9,12],   "action": simple_aoe_action,    "params": {"num_aoe_targets": 3}},
+        "轻弩":       {"dice": 6,  "bonus": [3,6,6,9,9,12],   "action": light_bowgun_action},
+        "重弩 (N=2)": {"dice": 8,  "bonus": [3,6,6,9,9,12],   "action": heavy_bowgun_action,  "params": {"buff_stacks": 2}},
+    }
+
+    # --- 数据存储 ---
+    results_data = []
+    weapon_order = list(WEAPON_CONFIG.keys())
+
+    # --- 模拟循环 ---
+    for pro_val in range(1, 7):
+        Pro = pro_val
+        for name, config in WEAPON_CONFIG.items():
+            params = config.get("params", {})
+            
+            # 构建base_damage_roll函数
+            def create_damage_roll(p, c):
+                bonus_val = c['bonus'][p-1]
+                damage_multiplier = c.get("params", {}).get("damage_multiplier", 1)
+                extra_roll_dice = c.get("params", {}).get("extra_roll_dice")
+                damage_bonus = c.get("params", {}).get("damage_bonus", 0)
+
+                def roll_func():
+                    main_damage = roll_dice(p, c['dice'], bonus_val)
+                    if extra_roll_dice:
+                        main_damage += roll_dice(p, extra_roll_dice, 0)
+                    return (main_damage + damage_bonus) * damage_multiplier
+                return roll_func
+
+            attacker_stats = SimpleNamespace(
+                attack_modifier=ATTACKER_MOD + params.get("attack_modifier_bonus", 0),
+                base_damage_roll=create_damage_roll(Pro, config),
+                **params
+            )
+
+            sim = Simulator(config["action"], attacker_stats, DEFENDER)
+            _, avg_dmg = sim.run(NUM_SIMULATIONS, NUM_ROUNDS, pro_val)
+            results_data.append({'Weapon': name, 'Pro': Pro, 'HP Loss': avg_dmg})
+
+    # --- 结果展示 ---
+    df = pd.DataFrame(results_data)
+    df['Weapon'] = pd.Categorical(df['Weapon'], categories=weapon_order, ordered=True)
+    df.sort_values('Weapon', inplace=True)
     
-
-
-    # --- 武器对比报告 ---
-
-    #  基础武器 (1d10)
-    print(f"--- 基础武器 ({Pro}d10+6) ---")
-    attacker_s1 = SimpleNamespace(attack_modifier=ATTACKER_MOD, base_damage_roll=lambda: roll_dice(Pro, 10, 6))
-    sim_s1 = Simulator(simple_attack_action, attacker_s1, DEFENDER)
-    _, avg_dmg = sim_s1.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-
-    #  大剑 ((1d12+3) * 2)
-    print(f"--- 大剑 (({Pro}d12+3) * 2) ---")
-    attacker_gs = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD, 
-        base_damage_roll=lambda: roll_dice(Pro, 12, 3) * 2
-    )
-    sim_gs = Simulator(simple_attack_action, attacker_gs, DEFENDER)
-    _, avg_dmg = sim_gs.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-    # 片手 (1d6+2+1d8)
-    print(f"--- 片手 ({Pro}d6+2+{Pro}d8) ---")
-    attacker_new = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD, 
-        base_damage_roll=lambda: roll_dice(Pro, 8, 2) + roll_dice(Pro, 8, 0)
-    )
-    sim_new = Simulator(simple_attack_action, attacker_new, DEFENDER)
-    _, avg_dmg = sim_new.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-    #  双刀 (1d6+1)
-    print(f"--- 双刀 ({Pro}d6+1, 每回合攻击3次) ---")
-    attacker_s5 = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD,
-        base_damage_roll=lambda: roll_dice(Pro, 6, 1),
-        num_attacks=3
-    )
-    sim_s5 = Simulator(multi_attack_action, attacker_s5, DEFENDER)
-    _, avg_dmg = sim_s5.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-    #  太刀
-    print(f"--- 太刀 ({Pro}d10, 伤害+4, 上限3次) ---")
-    attacker_s2 = SimpleNamespace(attack_modifier=ATTACKER_MOD, base_damage_roll=lambda: roll_dice(Pro, 10, 0))
-    sim_s2 = Simulator(stacking_bonus_action, attacker_s2, DEFENDER)
-    _, avg_dmg = sim_s2.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-
-    #  大锤 (1d12+1)
-    print(f"---  大锤 ({Pro}d12+1, 攻击3次后脆弱2回合[命中+1d6]) ---")
-    attacker_gh = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD, 
-        base_damage_roll=lambda: roll_dice(Pro, 12, 1)
-    )
-    sim_gh = Simulator(great_hammer_action, attacker_gh, DEFENDER)
-    _, avg_dmg = sim_gh.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-
-    #  狩猎笛 (1d8+3)
-    print("---  狩猎笛 (1d8+3, 攻击命中+1, 伤害+2) ---")
-    attacker_hh = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD + 1, 
-        base_damage_roll=lambda: roll_dice(Pro, 8, 3) + 2
-    )
-    sim_hh = Simulator(simple_attack_action, attacker_hh, DEFENDER)
-    _, avg_dmg = sim_hh.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-
-    #  长枪 (1d8+1)
-    print("---  长枪 (1d8+1, 40%概率追击) ---")
-    attacker_lance = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD, 
-        base_damage_roll=lambda: roll_dice(Pro, 8, 1)
-    )
-    sim_lance = Simulator(lance_action, attacker_lance, DEFENDER)
-    _, avg_dmg = sim_lance.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-    #  铳枪
-    print(f"--- 铳枪 {Pro}d10+3 (3回合后引爆) ---")
-    attacker_s6 = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD, 
-        base_damage_roll=lambda: roll_dice(Pro, 10, 3)
-    )
-    sim_s6 = Simulator(wyvernstake_action, attacker_s6, DEFENDER)
-    _, avg_dmg = sim_s6.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-
-
-    #  斩斧
-    print(f"--- 斩斧 ({Pro}d10+3, 命中N次后, 攻击+N, 伤害+2N, 持续N次) ---")
-    for n in range(1, 6):
-        attacker_s3 = SimpleNamespace(
-            attack_modifier=ATTACKER_MOD,
-            base_damage_roll=lambda: roll_dice(Pro, 10, 3),
-            form_switch_threshold=n,
-            form_duration=n,
-            form_damage_bonus=3*n,
-            form_attack_bonus=3*n
-        )
-        sim_s3 = Simulator(form_switching_action, attacker_s3, DEFENDER)
-        _, avg_dmg = sim_s3.run(NUM_SIMULATIONS)
-        print(f"  当 N={n}: 伤害期望: {avg_dmg:.2f}")
-    print("")
-
-    #  盾斧 (1d12)
-    aoe = 3
-    print(f"--- 盾斧 ({Pro}d12, 命中+2Token, 有N个Token时超解, AoE伤害+Token^2, 目标{aoe}人) ---")
-    for N in range(1,6): # 假设需要6个Token（命中3次）才能超解
-        attacker_s4 = SimpleNamespace(
-            attack_modifier=ATTACKER_MOD,
-            base_damage_roll=lambda: roll_dice(Pro, 12),
-            discharge_threshold=N,
-            num_aoe_targets=aoe
-        )
-        sim_s4 = Simulator(charge_blade_action, attacker_s4, DEFENDER)
-        _, avg_dmg = sim_s4.run(NUM_SIMULATIONS)
-        print(f"  当 N={N}时：伤害期望: {avg_dmg:.2f}")
-    print("")
-
-    # 虫棍
-    print(f"--- 虫棍 ({Pro}d8+1, Token机制) ---")
-    attacker_s7 = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD,
-        base_damage_roll=lambda: roll_dice(Pro, 8, 1)
-    )
-    sim_s7 = Simulator(insect_glaive_action, attacker_s7, DEFENDER)
-    _, avg_dmg = sim_s7.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-
-
-
-    # 龙矢
-    print(f"--- 龙矢 ({Pro}d8+1, 攻击3个目标) ---")
-    attacker_s8 = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD,
-        base_damage_roll=lambda: roll_dice(Pro, 8, 3),
-        num_aoe_targets=3
-    )
-    sim_s8 = Simulator(simple_aoe_action, attacker_s8, DEFENDER)
-    _, avg_dmg = sim_s8.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
-
-
-
-
-
-    # 轻弩 (1d6+3)
-    print(f"--- 轻弩 ({Pro}d6+3, 失败可重骰) ---")
-    attacker_lbg = SimpleNamespace(
-        attack_modifier=ATTACKER_MOD, 
-        base_damage_roll=lambda: roll_dice(Pro, 6, 3)
-    )
-    sim_lbg = Simulator(light_bowgun_action, attacker_lbg, DEFENDER)
-    _, avg_dmg = sim_lbg.run(NUM_SIMULATIONS)
-    print(f"伤害期望: {avg_dmg:.2f}\n")
+    pivot_df = df.pivot(index='Weapon', columns='Pro', values='HP Loss')
+    
+    pd.set_option('display.float_format', '{:.2f}'.format)
+    print(f"模拟环境: 敌人防御={DEFENDER.defense}, 伤害阈值随Pro等级变化, 每场战斗 {NUM_ROUNDS} 回合, 共模拟 {NUM_SIMULATIONS} 次")
+    try:
+        from tabulate import tabulate
+        print(tabulate(pivot_df, headers='keys', tablefmt='psql'))
+    except ImportError:
+        print("\n[提示] 'tabulate' 库未安装，建议运行 'pip install tabulate' 以获得更美观的表格输出。")
+        print(pivot_df)
