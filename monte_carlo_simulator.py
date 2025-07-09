@@ -9,28 +9,32 @@ def roll_dice(num_dice, num_sides, modifier=0):
 
 # --- Action Functions: 每个函数代表一种武器或攻击模式的完整回合逻辑 ---
 
-def simple_attack_action(state, attacker, defender):
+def simple_attack_action(state, attacker, defender, current_round=0):
     """动作: 基础单体攻击，无任何特性。"""
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
-    if attack_roll > defender.defense:
+    if attack_roll >= defender.defense:
         return attacker.base_damage_roll(), 1
     return 0, 0
 
-def stacking_bonus_action(state, attacker, defender):
-    """动作: 连续命中可叠加伤害。"""
+def long_sword_token_action(state, attacker, defender, current_round=0):
+    """动作: 太刀 - 见切。通过Token系统获得伤害加成。"""
+    tokens = state.get('tokens', 0)
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
-    if attack_roll > defender.defense:
-        consecutive_hits = state.get('consecutive_hits', 0)
-        bonus_damage = min(consecutive_hits, 3) * 5
+    
+    if attack_roll >= defender.defense:
+        # 命中: 获得一个Token，上限为3
+        tokens = min(tokens + 1, 3)
+        state['tokens'] = tokens
+        bonus_damage = tokens * 4
         damage = attacker.base_damage_roll() + bonus_damage
-        state['consecutive_hits'] = consecutive_hits + 1
         return damage, 1
     else:
-        consecutive_hits = state.get('consecutive_hits', 0)
-        state['consecutive_hits'] = max(consecutive_hits-1, 0)
+        # 未命中: 失去一个Token，下限为0
+        tokens = max(tokens - 1, 0)
+        state['tokens'] = tokens
         return 0, 0
 
-def form_switching_action(state, attacker, defender):
+def form_switching_action(state, attacker, defender, current_round=0):
     """动作: 成功攻击N次后切换形态，在形态内获得命中和伤害加成。"""
     # 检查并更新激活的形态
     if state.get('form_active', False):
@@ -46,7 +50,7 @@ def form_switching_action(state, attacker, defender):
 
     # 执行攻击
     attack_roll = roll_dice(2, 12, current_attack_modifier)
-    if attack_roll > defender.defense:
+    if attack_roll >= defender.defense:
         bonus_damage = attacker.form_damage_bonus if state.get('form_active', False) else 0
         damage = attacker.base_damage_roll() + bonus_damage
         
@@ -61,19 +65,19 @@ def form_switching_action(state, attacker, defender):
     else:
         return 0, 0
 
-def charge_blade_action(state, attacker, defender):
+def charge_blade_action(state, attacker, defender, current_round=0):
     """动作: 盾斧。积攒Token，然后通过“超解”释放巨大伤害。"""
     tokens = state.get('tokens', 0)
 
-    # 如果Token达到阈值，则执行“超解”
-    if tokens >= attacker.discharge_threshold:
+    # 如果Token达到阈值，或在第10回合且有Token，则执行“超解”
+    if (tokens >= attacker.discharge_threshold) or (current_round == 10 and tokens > 0):
         state['tokens'] = 0 # 消耗所有Token
         attack_roll = roll_dice(2, 12, attacker.attack_modifier)
-        if attack_roll > defender.defense:
+        if attack_roll >= defender.defense:
             # 超解命中
-            bonus_damage = (tokens ** 2) * attacker.num_aoe_targets
+            bonus_damage = ((2*tokens) ** 2) 
             single_target_damage = attacker.base_damage_roll() 
-            total_damage = single_target_damage + bonus_damage
+            total_damage = (single_target_damage + bonus_damage) * attacker.num_aoe_targets
             return total_damage, attacker.num_aoe_targets
         else:
             # 超解未命中
@@ -81,33 +85,33 @@ def charge_blade_action(state, attacker, defender):
     
     # --- 如果未达到阈值，则执行普通攻击以积攒Token ---
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
-    if attack_roll > defender.defense:
+    if attack_roll >= defender.defense:
         # 命中，获得Token
-        state['tokens'] = tokens + 2
+        state['tokens'] = tokens + 1
         return attacker.base_damage_roll(), 1
     else:
         # 未命中
         return 0, 0
 
-def multi_attack_action(state, attacker, defender):
+def multi_attack_action(state, attacker, defender, current_round=0):
     """动作: 每回合进行多次独立的攻击。"""
     total_damage_this_turn = 0
     total_hits_this_turn = 0
     # 在一回合内循环执行多次攻击
     for _ in range(attacker.num_attacks):
         attack_roll = roll_dice(2, 12, attacker.attack_modifier)
-        if attack_roll > defender.defense:
+        if attack_roll >= defender.defense:
             total_hits_this_turn += 1
             total_damage_this_turn += attacker.base_damage_roll()
     return total_damage_this_turn, total_hits_this_turn
 
-def wyvernstake_action(state, attacker, defender):
+def wyvernstake_action(state, attacker, defender, current_round=0):
     """动作: 起爆龙杭。插入动作是一次攻击，成功后开始倒计时。"""
     
     # 如果龙杭未激活，则本回合的动作是“尝试插入”
     if not state.get('stake_active', False):
         attack_roll = roll_dice(2, 12, attacker.attack_modifier)
-        if attack_roll > defender.defense:
+        if attack_roll >= defender.defense:
             # 插入成功: 造成伤害并激活状态
             state['stake_active'] = True
             state['countdown'] = 3
@@ -122,7 +126,7 @@ def wyvernstake_action(state, attacker, defender):
     
     # 1. 执行本回合的常规攻击
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
-    if attack_roll > defender.defense:
+    if attack_roll >= defender.defense:
         hits_this_turn = 1
         damage = attacker.base_damage_roll()
         damage_this_turn += damage
@@ -134,7 +138,7 @@ def wyvernstake_action(state, attacker, defender):
 
     # 3. 检查是否在本回合结束后引爆
     if state['countdown'] <= 0:
-        explosion_damage = (2 + state.get('damage_accumulated', 0))
+        explosion_damage = (state.get('damage_accumulated', 0))
         damage_this_turn += explosion_damage
         # 重置状态，以便下回合可以重新插入
         state['stake_active'] = False
@@ -142,7 +146,7 @@ def wyvernstake_action(state, attacker, defender):
         state.pop('countdown', None)
     
     return damage_this_turn, hits_this_turn
-def insect_glaive_action(state, attacker, defender):
+def insect_glaive_action(state, attacker, defender, current_round=0):
     """动作: 虫棍。基于Token数量获得不同增益。"""
     tokens = state.get('tokens', 0)
     
@@ -159,7 +163,7 @@ def insect_glaive_action(state, attacker, defender):
     # 执行攻击
     attack_roll = roll_dice(2, 12, current_attack_modifier)
     
-    if attack_roll > defender.defense:
+    if attack_roll >= defender.defense:
         # --- 命中 ---
         # 增加Token，上限为3
         state['tokens'] = min(tokens + 1, 3)
@@ -172,16 +176,16 @@ def insect_glaive_action(state, attacker, defender):
         return 0, 0
 
 
-def simple_aoe_action(state, attacker, defender):
+def simple_aoe_action(state, attacker, defender, current_round=0):
     """动作: 简单的AoE攻击，一次判定，伤害应用到所有目标。"""
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
-    if attack_roll > defender.defense:
+    if attack_roll >= defender.defense:
         damage = attacker.base_damage_roll() * attacker.num_aoe_targets
         hits = attacker.num_aoe_targets
         return damage, hits
     return 0, 0
 
-def great_hammer_action(state, attacker, defender):
+def great_hammer_action(state, attacker, defender, current_round=0):
     """动作: 大锤。攻击3次后，敌人脆弱2回合（攻击命中+1d6）。"""
     
     # 检查并更新脆弱状态
@@ -210,7 +214,7 @@ def great_hammer_action(state, attacker, defender):
             state['vulnerable_duration'] = 2
             state['attack_count'] = 0 # 触发后立即重置
 
-    if attack_roll > defender.defense:
+    if attack_roll >= defender.defense:
         bonus_damage = 0
         if state.get('vulnerable_active',False):
             bonus_damage = roll_dice(1,12,-1)
@@ -218,7 +222,7 @@ def great_hammer_action(state, attacker, defender):
     
     return 0, 0
 
-def lance_action(state, attacker, defender):
+def lance_action(state, attacker, defender, current_round=0):
     """动作: 长枪。有40%的概率进行一次追击。"""
     total_damage_this_turn = 0
     total_hits_this_turn = 0
@@ -230,7 +234,7 @@ def lance_action(state, attacker, defender):
         total_damage_this_turn += attacker.base_damage_roll()
 
     # 40%概率追击
-    if random.random() < 1:
+    if random.random() < 0.5:
         attack_roll_2 = roll_dice(2, 12, attacker.attack_modifier)
         if attack_roll_2 > defender.defense:
             total_hits_this_turn += 1
@@ -238,7 +242,7 @@ def lance_action(state, attacker, defender):
             
     return total_damage_this_turn, total_hits_this_turn
 
-def light_bowgun_action(state, attacker, defender):
+def light_bowgun_action(state, attacker, defender, current_round=0):
     """动作: 轻弩。攻击失败时可以重骰一次。"""
     # 第一次攻击检定
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
@@ -248,12 +252,12 @@ def light_bowgun_action(state, attacker, defender):
         attack_roll = roll_dice(2, 12, attacker.attack_modifier)
 
     # 以最终结果判断命中
-    if attack_roll > defender.defense:
+    if attack_roll >= defender.defense:
         return attacker.base_damage_roll(), 1
     
     return 0, 0
 
-def heavy_bowgun_action(state, attacker, defender):
+def heavy_bowgun_action(state, attacker, defender, current_round=0):
     """动作: 重弩。根据固定的buff层数获得攻击和伤害加成。"""
     # Buff层数由attacker对象提供，是固定的
     buff_stacks = attacker.buff_stacks
@@ -265,7 +269,7 @@ def heavy_bowgun_action(state, attacker, defender):
     # 执行攻击
     attack_roll = roll_dice(2, 12, current_attack_modifier)
     
-    if attack_roll > defender.defense:
+    if attack_roll >= defender.defense:
         damage = attacker.base_damage_roll() + bonus_damage
         return damage, 1
     else:
@@ -300,8 +304,8 @@ class Simulator:
             state = {}
             battle_total_hp_loss = 0
             
-            for _ in range(num_rounds):
-                damage_this_round, hits_this_round = self.action_function(state, self.attacker_stats, self.defender_stats)
+            for current_round in range(1, num_rounds + 1):
+                damage_this_round, hits_this_round = self.action_function(state, self.attacker_stats, self.defender_stats, current_round)
                 hp_loss_this_round = self._convert_damage_to_hp_loss(damage_this_round, pro_level)
                 battle_total_hp_loss += hp_loss_this_round
                 grand_total_hits += hits_this_round
@@ -327,21 +331,32 @@ if __name__ == "__main__":
 
     # --- 武器配置中心 ---
     WEAPON_CONFIG = {
-        "参考":       {"dice": 10, "bonus": [3,6,6,9,9,12], "action": simple_attack_action},
+        "原版长剑":   {"dice": 10, "bonus": [6,9,9,12,12,15],   "action": simple_attack_action}, # 相当于高一位阶的武器
         "大剑":       {"dice": 12, "bonus": [3,6,6,9,9,12],   "action": simple_attack_action, "params": {"damage_multiplier": 2}},
-        "片手":       {"dice": 8,  "bonus": [2,5,5,8,8,11],   "action": simple_attack_action, "params": {"extra_roll_dice": 8}},
-        "双刀":       {"dice": 6,  "bonus": [1,4,4,7,7,10],   "action": multi_attack_action,  "params": {"num_attacks": 3}},
-        "太刀":       {"dice": 10, "bonus": [0,3,3,6,6,9],   "action": stacking_bonus_action},
+        "片手":       {"dice": 6,  "bonus": [2,6,6,10,10,14], "action": simple_attack_action, "params": {"extra_roll_dice": 8}},
+        "双刀":       {"dice": 8,  "bonus": [0,3,3,6,6,9],    "action": multi_attack_action,  "params": {"num_attacks": 2}},
+        "太刀":       {"dice": 8, "bonus": [0,3,3,6,6,9],   "action": long_sword_token_action},
         "大锤":       {"dice": 12, "bonus": [1,4,4,7,7,10],   "action": great_hammer_action},
-        "狩猎笛":     {"dice": 8,  "bonus": [3,6,6,9,9,12],   "action": simple_attack_action, "params": {"attack_modifier_bonus": 1, "damage_bonus": 2}},
-        "长枪":       {"dice": 8,  "bonus": [1,4,4,7,7,10],   "action": lance_action},
+        "狩猎笛":     {"dice": 8,  "bonus": [0,3,3,6,6,9],   "action": simple_attack_action, "params": {"attack_modifier_bonus": 1, "damage_bonus": 2}},
+        "长枪":       {"dice": 10,  "bonus": [1,4,4,7,7,10],   "action": lance_action},
         "铳枪":       {"dice": 10, "bonus": [3,6,6,9,9,12],   "action": wyvernstake_action},
-        "斩斧 (N=3)": {"dice": 10, "bonus": [3,6,6,9,9,12],   "action": form_switching_action,"params": {"form_switch_threshold": 3, "form_duration": 3, "form_damage_bonus": 9, "form_attack_bonus": 9}},
-        "盾斧 (N=4)": {"dice": 12, "bonus": [0,3,3,6,6,9],   "action": charge_blade_action,  "params": {"discharge_threshold": 4, "num_aoe_targets": 3}},
+        "斩斧 (N=1)": {"dice": 10, "bonus": [3,6,6,9,9,12],   "action": form_switching_action,"params": {"form_switch_threshold": 1, "form_duration": 1, "form_damage_bonus": 2, "form_attack_bonus": 1}},
+        "斩斧 (N=2)": {"dice": 10, "bonus": [3,6,6,9,9,12],   "action": form_switching_action,"params": {"form_switch_threshold": 2, "form_duration": 2, "form_damage_bonus": 4, "form_attack_bonus": 2}},
+        "斩斧 (N=3)": {"dice": 10, "bonus": [3,6,6,9,9,12],   "action": form_switching_action,"params": {"form_switch_threshold": 3, "form_duration": 3, "form_damage_bonus": 6, "form_attack_bonus": 3}},
+        "斩斧 (N=4)": {"dice": 10, "bonus": [3,6,6,9,9,12],   "action": form_switching_action,"params": {"form_switch_threshold": 4, "form_duration": 4, "form_damage_bonus": 8, "form_attack_bonus": 4}},
+        "斩斧 (N=5)": {"dice": 10, "bonus": [3,6,6,9,9,12],   "action": form_switching_action,"params": {"form_switch_threshold": 5, "form_duration": 5, "form_damage_bonus": 10, "form_attack_bonus": 5}},
+        "盾斧 (N=1)": {"dice": 12, "bonus": [3,6,6,9,9,12],   "action": charge_blade_action,  "params": {"discharge_threshold": 1, "num_aoe_targets": 1}},
+        "盾斧 (N=2)": {"dice": 12, "bonus": [3,6,6,9,9,12],   "action": charge_blade_action,  "params": {"discharge_threshold": 2, "num_aoe_targets": 2}},
+        "盾斧 (N=3)": {"dice": 12, "bonus": [3,6,6,9,9,12],   "action": charge_blade_action,  "params": {"discharge_threshold": 3, "num_aoe_targets": 3}},
+        "盾斧 (N=4)": {"dice": 12, "bonus": [3,6,6,9,9,12],   "action": charge_blade_action,  "params": {"discharge_threshold": 4, "num_aoe_targets": 3}},
+        "盾斧 (N=5)": {"dice": 12, "bonus": [3,6,6,9,9,12],   "action": charge_blade_action,  "params": {"discharge_threshold": 5, "num_aoe_targets": 3}},
         "虫棍":       {"dice": 8,  "bonus": [1,4,4,7,7,10],   "action": insect_glaive_action},
         "龙矢":       {"dice": 8,  "bonus": [3,6,6,9,9,12],   "action": simple_aoe_action,    "params": {"num_aoe_targets": 3}},
-        "轻弩":       {"dice": 6,  "bonus": [3,6,6,9,9,12],   "action": light_bowgun_action},
-        "重弩 (N=2)": {"dice": 8,  "bonus": [3,6,6,9,9,12],   "action": heavy_bowgun_action,  "params": {"buff_stacks": 2}},
+        "轻弩":       {"dice": 6,  "bonus": [1,4,4,7,7,10],    "action": light_bowgun_action},
+        "重弩 (N=1)": {"dice": 8,  "bonus": [0,3,3,6,6,9],    "action": heavy_bowgun_action,  "params": {"buff_stacks": 1}},
+        "重弩 (N=2)": {"dice": 8,  "bonus": [0,3,3,6,6,9],    "action": heavy_bowgun_action,  "params": {"buff_stacks": 2}},
+        "重弩 (N=3)": {"dice": 8,  "bonus": [0,3,3,6,6,9],    "action": heavy_bowgun_action,  "params": {"buff_stacks": 3}},
+        "重弩 (N=4)": {"dice": 8,  "bonus": [0,3,3,6,6,9],    "action": heavy_bowgun_action,  "params": {"buff_stacks": 4}},
     }
 
     # --- 数据存储 ---
