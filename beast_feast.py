@@ -84,12 +84,12 @@ def run_simulation(dice_counts, num_simulations, removal_strategy):
 if __name__ == "__main__":
     # 示例配置：5d12, 3d8, 1d4
     dice_configuration = {
-        'd4': 0, # 7.6 / 3.5
-        'd6': 0, # 11.7 / 10.8
-        'd8': 0, # 15.4 / 22
-        'd10': 0, # 18.8 / 36.5
-        'd12': 0, # 22.1 / 54
-        'd20': 10, # 32.5 / 156
+        'd4': 0, 
+        'd6': 4, 
+        'd8': 0, 
+        'd10': 0,
+        'd12': 0,
+        'd20': 0,
     }
     
     # 用户可以修改这里的骰子数量
