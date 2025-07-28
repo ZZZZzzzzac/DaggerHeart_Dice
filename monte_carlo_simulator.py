@@ -7,16 +7,31 @@ def roll_dice(num_dice, num_sides, modifier=0):
     """模拟掷骰子并返回总和。"""
     return sum(random.randint(1, num_sides) for _ in range(num_dice)) + modifier
 
+# --- Helper Functions ---
+def convert_damage_to_hp_loss(damage, defender_stats, pro_level):
+    """根据伤害阈值将伤害转换为HP损失。"""
+    if damage <= 0:
+        return 0
+    
+    # 根据Pro等级选择正确的阈值
+    threshold1, threshold2 = defender_stats.thresholds[pro_level - 1]
+    if damage < threshold1:
+        return 1
+    elif damage < threshold2:
+        return 2
+    else:
+        return 3
+
 # --- Action Functions: 每个函数代表一种武器或攻击模式的完整回合逻辑 ---
 
-def simple_attack_action(state, attacker, defender, current_round=0):
+def simple_attack_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 基础单体攻击，无任何特性。"""
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
     if attack_roll >= defender.defense:
         return attacker.base_damage_roll(), 1
     return 0, 0
 
-def long_sword_token_action(state, attacker, defender, current_round=0):
+def long_sword_token_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 太刀 - 见切。通过Token系统获得伤害加成。"""
     tokens = state.get('tokens', 0)
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
@@ -25,7 +40,7 @@ def long_sword_token_action(state, attacker, defender, current_round=0):
         # 命中: 获得一个Token，上限为3
         tokens = min(tokens + 1, 3)
         state['tokens'] = tokens
-        bonus_damage = tokens * 4
+        bonus_damage = tokens * 5
         damage = attacker.base_damage_roll() + bonus_damage
         return damage, 1
     else:
@@ -34,7 +49,7 @@ def long_sword_token_action(state, attacker, defender, current_round=0):
         state['tokens'] = tokens
         return 0, 0
 
-def form_switching_action(state, attacker, defender, current_round=0):
+def form_switching_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 成功攻击N次后切换形态，在形态内获得命中和伤害加成。"""
     # 检查并更新激活的形态
     if state.get('form_active', False):
@@ -65,7 +80,7 @@ def form_switching_action(state, attacker, defender, current_round=0):
     else:
         return 0, 0
 
-def charge_blade_action(state, attacker, defender, current_round=0):
+def charge_blade_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 盾斧。积攒Token，然后通过“超解”释放巨大伤害。"""
     tokens = state.get('tokens', 0)
 
@@ -75,8 +90,8 @@ def charge_blade_action(state, attacker, defender, current_round=0):
         attack_roll = roll_dice(2, 12, attacker.attack_modifier)
         if attack_roll >= defender.defense:
             # 超解命中
-            bonus_damage = ((2*tokens) ** 2) 
-            single_target_damage = attacker.base_damage_roll() 
+            bonus_damage = ((2*tokens) ** 2)
+            single_target_damage = attacker.base_damage_roll()
             total_damage = (single_target_damage + bonus_damage) * attacker.num_aoe_targets
             return total_damage, attacker.num_aoe_targets
         else:
@@ -93,7 +108,7 @@ def charge_blade_action(state, attacker, defender, current_round=0):
         # 未命中
         return 0, 0
 
-def multi_attack_action(state, attacker, defender, current_round=0):
+def multi_attack_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 每回合进行多次独立的攻击。"""
     total_damage_this_turn = 0
     total_hits_this_turn = 0
@@ -105,7 +120,7 @@ def multi_attack_action(state, attacker, defender, current_round=0):
             total_damage_this_turn += attacker.base_damage_roll()
     return total_damage_this_turn, total_hits_this_turn
 
-def wyvernstake_action(state, attacker, defender, current_round=0):
+def wyvernstake_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 起爆龙杭。插入动作是一次攻击，成功后开始倒计时。"""
     
     # 如果龙杭未激活，则本回合的动作是“尝试插入”
@@ -146,37 +161,35 @@ def wyvernstake_action(state, attacker, defender, current_round=0):
         state.pop('countdown', None)
     
     return damage_this_turn, hits_this_turn
-def insect_glaive_action(state, attacker, defender, current_round=0):
-    """动作: 虫棍。基于Token数量获得不同增益。"""
+
+def insect_glaive_action(state, attacker, defender, pro_level, current_round=0):
+    """动作: 虫棍。敌人掉x点血就获得x个token，花费1个token使命中+1d6. 策略是有token就用。"""
     tokens = state.get('tokens', 0)
     
-    # 根据Token数量计算动态加成
-    current_attack_modifier = attacker.attack_modifier
-    bonus_damage = 0
-    if tokens >= 1:
-        current_attack_modifier += 2
-    if tokens >= 2:
-        bonus_damage += 4
-    # if tokens >= 3:
-        # bonus_damage += 2 # 在2-token的基础上再+2，总共+4
+    # 策略：有token就用
+    hit_roll_modifier = attacker.attack_modifier
+    if tokens > 0:
+        state['tokens'] = tokens - 1
+        hit_roll_modifier += roll_dice(1, 6)
 
     # 执行攻击
-    attack_roll = roll_dice(2, 12, current_attack_modifier)
+    attack_roll = roll_dice(2, 12, hit_roll_modifier)
     
     if attack_roll >= defender.defense:
         # --- 命中 ---
-        # 增加Token，上限为3
-        state['tokens'] = min(tokens + 1, 3)
-        damage = attacker.base_damage_roll() + bonus_damage
+        damage = attacker.base_damage_roll()
+        hp_loss = convert_damage_to_hp_loss(damage, defender, pro_level)
+        
+        # 获得token
+        state['tokens'] = state.get('tokens', 0) + hp_loss
+        
         return damage, 1
     else:
         # --- 未命中 ---
-        # 减少Token，下限为0
-        state['tokens'] = max(tokens - 1, 0)
+        # 未命中不获得token
         return 0, 0
 
-
-def simple_aoe_action(state, attacker, defender, current_round=0):
+def simple_aoe_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 简单的AoE攻击，一次判定，伤害应用到所有目标。"""
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
     if attack_roll >= defender.defense:
@@ -185,8 +198,8 @@ def simple_aoe_action(state, attacker, defender, current_round=0):
         return damage, hits
     return 0, 0
 
-def great_hammer_action(state, attacker, defender, current_round=0):
-    """动作: 大锤。攻击3次后，敌人脆弱2回合（攻击命中+1d6）。"""
+def great_hammer_action(state, attacker, defender, pro_level, current_round=0):
+    """动作: 大锤。敌人掉2点及以上血时，怪物脆弱2回合。命中+1d6。"""
     
     # 检查并更新脆弱状态
     if state.get('vulnerable_active', False):
@@ -194,7 +207,6 @@ def great_hammer_action(state, attacker, defender, current_round=0):
         if state['vulnerable_duration'] <= 0:
             state['vulnerable_active'] = False
             state.pop('vulnerable_duration', None)
-            state['attack_count'] = 0 # 脆弱结束后重置攻击计数
 
     # 计算本次攻击的命中加成
     hit_roll_modifier = attacker.attack_modifier
@@ -204,25 +216,20 @@ def great_hammer_action(state, attacker, defender, current_round=0):
     # 执行攻击
     attack_roll = roll_dice(2, 12, hit_roll_modifier)
     
-    # 如果脆弱未激活，则累积攻击次数
-    if not state.get('vulnerable_active', False):
-        attack_count = state.get('attack_count', 0) + 1
-        state['attack_count'] = attack_count
-        # 检查是否触发脆弱
-        if attack_count >= 3:
-            state['vulnerable_active'] = True
-            state['vulnerable_duration'] = 2
-            state['attack_count'] = 0 # 触发后立即重置
-
     if attack_roll >= defender.defense:
-        bonus_damage = 0
-        if state.get('vulnerable_active',False):
-            bonus_damage = roll_dice(1,12,-1)
-        return attacker.base_damage_roll() + bonus_damage, 1
+        damage = attacker.base_damage_roll()
+        hp_loss = convert_damage_to_hp_loss(damage, defender, pro_level)
+        
+        # 如果HP损失>=2，触发脆弱
+        if hp_loss >= 2 and not state.get('vulnerable_active', False):
+            state['vulnerable_active'] = True
+            state['vulnerable_duration'] = 2 # 从下回合开始，持续2回合
+            
+        return damage, 1
     
     return 0, 0
 
-def lance_action(state, attacker, defender, current_round=0):
+def lance_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 长枪。有40%的概率进行一次追击。"""
     total_damage_this_turn = 0
     total_hits_this_turn = 0
@@ -242,7 +249,7 @@ def lance_action(state, attacker, defender, current_round=0):
             
     return total_damage_this_turn, total_hits_this_turn
 
-def light_bowgun_action(state, attacker, defender, current_round=0):
+def light_bowgun_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 轻弩。攻击失败时可以重骰一次。"""
     # 第一次攻击检定
     attack_roll = roll_dice(2, 12, attacker.attack_modifier)
@@ -257,7 +264,7 @@ def light_bowgun_action(state, attacker, defender, current_round=0):
     
     return 0, 0
 
-def heavy_bowgun_action(state, attacker, defender, current_round=0):
+def heavy_bowgun_action(state, attacker, defender, pro_level, current_round=0):
     """动作: 重弩。根据固定的buff层数获得攻击和伤害加成。"""
     # Buff层数由attacker对象提供，是固定的
     buff_stacks = attacker.buff_stacks
@@ -284,17 +291,7 @@ class Simulator:
 
     def _convert_damage_to_hp_loss(self, damage, pro_level):
         """根据伤害阈值将伤害转换为HP损失。"""
-        if damage <= 0:
-            return 0
-        
-        # 根据Pro等级选择正确的阈值
-        threshold1, threshold2 = self.defender_stats.thresholds[pro_level - 1]
-        if damage < threshold1:
-            return 1
-        elif damage < threshold2:
-            return 2
-        else:
-            return 3
+        return convert_damage_to_hp_loss(damage, self.defender_stats, pro_level)
 
     def run(self, num_simulations=10000, num_rounds=10, pro_level=1):
         grand_total_hp_loss = 0
@@ -305,7 +302,7 @@ class Simulator:
             battle_total_hp_loss = 0
             
             for current_round in range(1, num_rounds + 1):
-                damage_this_round, hits_this_round = self.action_function(state, self.attacker_stats, self.defender_stats, current_round)
+                damage_this_round, hits_this_round = self.action_function(state, self.attacker_stats, self.defender_stats, pro_level, current_round)
                 hp_loss_this_round = self._convert_damage_to_hp_loss(damage_this_round, pro_level)
                 battle_total_hp_loss += hp_loss_this_round
                 grand_total_hits += hits_this_round
@@ -334,7 +331,7 @@ if __name__ == "__main__":
         "原版长剑":   {"dice": 10, "bonus": [6,9,9,12,12,15],   "action": simple_attack_action}, # 相当于高一位阶的武器
         "大剑":       {"dice": 12, "bonus": [3,6,6,9,9,12],   "action": simple_attack_action, "params": {"damage_multiplier": 2}},
         "片手":       {"dice": 6,  "bonus": [2,6,6,10,10,14], "action": simple_attack_action, "params": {"extra_roll_dice": 8}},
-        "双刀":       {"dice": 8,  "bonus": [0,3,3,6,6,9],    "action": multi_attack_action,  "params": {"num_attacks": 2}},
+        "双刀":       {"dice": 8,  "bonus": [0,1,1,4,4,7],    "action": multi_attack_action,  "params": {"num_attacks": 2}},
         "太刀":       {"dice": 8, "bonus": [0,3,3,6,6,9],   "action": long_sword_token_action},
         "大锤":       {"dice": 12, "bonus": [1,4,4,7,7,10],   "action": great_hammer_action},
         "狩猎笛":     {"dice": 8,  "bonus": [0,3,3,6,6,9],   "action": simple_attack_action, "params": {"attack_modifier_bonus": 1, "damage_bonus": 2}},
